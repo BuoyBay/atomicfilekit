@@ -1,0 +1,481 @@
+#If TargetWindows Then
+Private Declare Function AFCreate Lib "kernel32" Alias "CreateFileW" (entryPath As Ptr, access As UInt32, sharing As UInt32, security As Ptr, creation As UInt32, nativeOptions As UInt32, template As Ptr) As Ptr
+Private Declare Function AFWrite Lib "kernel32" Alias "WriteFile" (handle As Ptr, data As Ptr, count As UInt32, ByRef written As UInt32, overlapped As Ptr) As Int32
+Private Declare Function AFRead Lib "kernel32" Alias "ReadFile" (handle As Ptr, data As Ptr, count As UInt32, ByRef received As UInt32, overlapped As Ptr) As Int32
+Private Declare Function AFFlush Lib "kernel32" Alias "FlushFileBuffers" (handle As Ptr) As Int32
+Private Declare Function AFClose Lib "kernel32" Alias "CloseHandle" (handle As Ptr) As Int32
+Private Declare Function AFDelete Lib "kernel32" Alias "DeleteFileW" (entryPath As Ptr) As Int32
+Private Declare Function AFAttributes Lib "kernel32" Alias "GetFileAttributesW" (entryPath As Ptr) As UInt32
+Private Optional Declare Function AFReplace Lib "kernel32" Alias "ReplaceFileW" (destination As Ptr, replacement As Ptr, backup As Ptr, nativeOptions As UInt32, exclude As Ptr, reserved As Ptr) As Int32
+Private Declare Function AFMove Lib "kernel32" Alias "MoveFileExW" (source As Ptr, destination As Ptr, nativeOptions As UInt32) As Int32
+Private Declare Function AFLastError Lib "kernel32" Alias "GetLastError" () As UInt32
+Private Optional Declare Function AFCompare Lib "ucrtbase" Alias "memcmp" (left As Ptr, right As Ptr, count As UInt64) As Int32
+#Else
+Private Declare Function AFOpen Lib "c" Alias "open" (entryPath As String, nativeOptions As Int32, ...) As Int32
+Private Declare Function AFWrite Lib "c" Alias "write" (descriptor As Int32, data As Ptr, count As UInt64) As Int64
+Private Declare Function AFRead Lib "c" Alias "read" (descriptor As Int32, data As Ptr, count As UInt64) As Int64
+#If TargetLinux Then
+Private Optional Declare Function AFFlush Lib "c" Alias "fsync" (descriptor As Int32) As Int32
+#Else
+Private Delegate Function AFFlushCall(descriptor As Int32) As Int32
+Private Function AFFlush(descriptor As Int32) As Int32
+    Dim callNative As AFFlushCall = CType(AFSymbol("fsync"), AFFlushCall)
+    Return callNative(descriptor)
+End Function
+#End If
+Private Declare Function AFClose Lib "c" Alias "close" (descriptor As Int32) As Int32
+Private Declare Function AFDelete Lib "c" Alias "unlink" (entryPath As String) As Int32
+Private Declare Function AFRename Lib "c" Alias "rename" (source As String, destination As String) As Int32
+#If TargetLinux Then
+Private Optional Declare Function AFChmod Lib "c" Alias "fchmod" (descriptor As Int32, mode As UInt32) As Int32
+Private Optional Declare Function AFChown Lib "c" Alias "fchown" (descriptor As Int32, owner As UInt32, group As UInt32) As Int32
+#Else
+Private Delegate Function AFChownCall(descriptor As Int32, owner As UInt32, group As UInt32) As Int32
+Private Function AFChown(descriptor As Int32, owner As UInt32, group As UInt32) As Int32
+    Dim callNative As AFChownCall = CType(AFSymbol("fchown"), AFChownCall)
+    Return callNative(descriptor, owner, group)
+End Function
+Private Delegate Function AFChmodCall(descriptor As Int32, mode As UInt32) As Int32
+Private Function AFChmod(descriptor As Int32, mode As UInt32) As Int32
+    Dim callNative As AFChmodCall = CType(AFSymbol("fchmod"), AFChmodCall)
+    Return callNative(descriptor, mode)
+End Function
+#End If
+#If TargetLinux Then
+Private Optional Declare Function AFUser Lib "c" Alias "geteuid" () As UInt32
+#Else
+Private Declare Function AFUser Lib "c" Alias "geteuid" () As UInt32
+#End If
+Private Declare Function AFCopy32 Lib "c" Alias "memcpy" (ByRef value As UInt32, source As Ptr, count As UInt64) As Ptr
+Private Declare Function AFCopy16 Lib "c" Alias "memcpy" (ByRef value As UInt16, source As Ptr, count As UInt64) As Ptr
+Private Declare Function AFCompare Lib "c" Alias "memcmp" (left As Ptr, right As Ptr, count As UInt64) As Int32
+#If TargetMac Then
+Private Declare Function AFErrorPointer Lib "c" Alias "__error" () As Ptr
+Private Declare Function AFFindSymbol Lib "c" Alias "dlsym" (handle As Ptr, symbolName As String) As Ptr
+Private Delegate Function AFLStatCall(entryPath As String, metadata As Ptr) As Int32
+Private Function AFSymbol(symbolName As String) As Ptr
+    Dim found As Ptr = AFFindSymbol(CType(-2, Ptr), symbolName)
+    If found = Nil Then Throw New AtomicFileException("Native symbol is unavailable: " + symbolName)
+    Return found
+End Function
+Private Function AFLStat(entryPath As String, metadata As Ptr) As Int32
+    Dim symbolName As String = "lstat"
+    #If TargetIntel Then
+        symbolName = "lstat$INODE64"
+    #End If
+    Dim callNative As AFLStatCall = CType(AFSymbol(symbolName), AFLStatCall)
+    Return callNative(entryPath, metadata)
+End Function
+#Else
+Private Declare Function AFErrorPointer Lib "c" Alias "__errno_location" () As Ptr
+#If TargetLinux Then
+Private Optional Declare Function AFLStat Lib "c" Alias "lstat" (entryPath As String, metadata As Ptr) As Int32
+#Else
+Private Declare Function AFLStat Lib "c" Alias "lstat" (entryPath As String, metadata As Ptr) As Int32
+#End If
+#End If
+#End If
+
+Public Class AtomicFileException Inherits Exception
+    Public Property IsCommitted As Boolean = False
+    Public Sub Constructor(message As String, committed As Boolean = False)
+        Super.Constructor(message)
+        Me.IsCommitted = committed
+    End Sub
+End Class
+
+Private Function AFAt(data As Ptr, offset As Integer) As Ptr
+    Return CType(CType(data, Integer) + offset, Ptr)
+End Function
+
+Private Function AFBuffer(size As Integer) As Bytes
+    Dim value As New Bytes(size)
+    For i As Integer = 1 To size
+        value.Append(0)
+    Next
+    Return value
+End Function
+
+#If TargetWindows Then
+Private Function AFWide(entryPath As String) As Bytes
+    Dim value As Bytes = entryPath.AsUTF16LE()
+    value.Append(0)
+    value.Append(0)
+    Return value
+End Function
+#Else
+Private Function AF32(data As Ptr, offset As Integer) As UInt32
+    Dim value As UInt32
+    AFCopy32(value, AFAt(data, offset), 4)
+    Return value
+End Function
+Private Function AF16(data As Ptr, offset As Integer) As UInt16
+    Dim value As UInt16
+    AFCopy16(value, AFAt(data, offset), 2)
+    Return value
+End Function
+#End If
+
+' -1 means missing; otherwise permission bits (zero on Windows).
+Private Function AFInspect(entryPath As String) As Integer
+    #If TargetWindows Then
+        Dim wide As Bytes = AFWide(entryPath)
+        Dim attributes As UInt32 = AFAttributes(wide.DataPtr())
+        If attributes = 4294967295 Then
+            Dim code As UInt32 = AFLastError()
+            If code = 2 Then Return -1
+            Throw New AtomicFileException("Cannot inspect destination (native error " + Str(code) + ")")
+        End If
+        If (attributes And 1040) <> 0 Then Throw New AtomicFileException("Destination must be a regular file, not a directory or reparse point")
+        If (attributes And 1) <> 0 Then Throw New AtomicFileException("Destination is read-only")
+        Return 0
+    #Else
+        Dim data As Bytes = AFBuffer(512)
+        If AFLStat(entryPath, data.DataPtr()) <> 0 Then
+            Dim code As UInt32 = AF32(AFErrorPointer(), 0)
+            If code = 2 Then Return -1
+            Throw New AtomicFileException("Cannot inspect destination (native error " + Str(code) + ")")
+        End If
+        Dim mode As Integer
+        Dim links As Integer
+        Dim owner As UInt32
+        #If TargetMac Then
+            mode = AF16(data.DataPtr(), 4)
+            links = AF16(data.DataPtr(), 6)
+            owner = AF32(data.DataPtr(), 16)
+        #ElseIf TargetArm Then
+            mode = AF32(data.DataPtr(), 16)
+            links = AF32(data.DataPtr(), 20)
+            owner = AF32(data.DataPtr(), 24)
+        #Else
+            mode = AF32(data.DataPtr(), 24)
+            links = AF32(data.DataPtr(), 16)
+            owner = AF32(data.DataPtr(), 28)
+        #End If
+        If (mode And 61440) <> 32768 Then Throw New AtomicFileException("Destination must be a regular file, not a link or directory")
+        If links <> 1 Then Throw New AtomicFileException("Refusing to replace a file with multiple hard links")
+        If owner <> AFUser() Then Throw New AtomicFileException("Refusing to replace a file owned by another user")
+        If (mode And 3584) <> 0 Then Throw New AtomicFileException("Refusing to replace a file with special permission bits")
+        If (mode And 128) = 0 Then Throw New AtomicFileException("Destination is read-only")
+        Return mode And 511
+    #End If
+End Function
+
+#If Not TargetWindows Then
+Private Function AFGroup(entryPath As String) As UInt32
+    Dim data As Bytes = AFBuffer(512)
+    If AFLStat(entryPath, data.DataPtr()) <> 0 Then Throw New AtomicFileException("Cannot inspect destination group")
+    #If TargetMac Then
+        Return AF32(data.DataPtr(), 20)
+    #ElseIf TargetArm Then
+        Return AF32(data.DataPtr(), 28)
+    #Else
+        Return AF32(data.DataPtr(), 32)
+    #End If
+End Function
+#End If
+
+''' Single-threaded staged replacement. Parent directories must be trusted.
+Public Class AtomicFileTransaction
+    Private Property mPath As String
+    Private Property mTemporary As String
+    Private Property mCount As Integer = 0
+    Private Property mLimit As Integer
+    Private Property mClosed As Boolean = False
+    Private Property mCommitted As Boolean = False
+    Private Property mCleanupError As String
+    Private Property mRetainedPath As String
+    #If TargetWindows Then
+    Private Property mHandle As Ptr = Nil
+    #Else
+    Private Property mDescriptor As Int32 = -1
+    #End If
+
+    Public Sub Constructor(destination As String, maxBytes As Integer = 1073741824)
+        If destination = "" Or maxBytes < 0 Or maxBytes > 1099511627776 Then Throw New InvalidArgumentException("Destination and byte limit 0..1 TiB are required")
+        For Each character As String In String.Chars(destination)
+            If String.Asc(character) = 0 Then Throw New InvalidArgumentException("Destination contains NUL")
+        Next
+        mPath = New FileSystemItem(destination).FullPath()
+        mLimit = maxBytes
+        Dim mode As Integer = AFInspect(mPath)
+        For attempt As Integer = 1 To 64
+            Dim candidate As String = mPath + ".buoy-save-" + Str(System.Microseconds()) + "-" + Str(Random.RandomInteger(100000000, 999999999)) + ".tmp"
+            #If TargetWindows Then
+                Dim wide As Bytes = AFWide(candidate)
+                Dim handle As Ptr = AFCreate(wide.DataPtr(), 1073741824, 0, Nil, 1, 128, Nil)
+                If handle = CType(-1, Ptr) Then
+                    Dim code As UInt32 = AFLastError()
+                    If code = 80 Or code = 183 Then Continue For
+                    Throw New AtomicFileException("Cannot create staged file (native error " + Str(code) + ")")
+                End If
+                mHandle = handle
+            #Else
+                #If TargetMac Then
+                    Dim nativeOptions As Int32 = 16779777
+                #Else
+                    Dim nativeOptions As Int32 = 524481
+                #End If
+                Dim descriptor As Int32 = AFOpen(candidate, nativeOptions, 384)
+                If descriptor < 0 Then
+                    Dim code As UInt32 = AF32(AFErrorPointer(), 0)
+                    If code = 17 Then Continue For
+                    Throw New AtomicFileException("Cannot create staged file (native error " + Str(code) + ")")
+                End If
+                mDescriptor = descriptor
+            #End If
+            mTemporary = candidate
+            Exit Sub
+        Next
+        Throw New AtomicFileException("Cannot allocate a unique staged filename")
+    End Sub
+
+    Public Property Count As Integer
+        Get
+            Return mCount
+        End Get
+    End Property
+    Public Property IsClosed As Boolean
+        Get
+            Return mClosed
+        End Get
+    End Property
+    Public Property IsCommitted As Boolean
+        Get
+            Return mCommitted
+        End Get
+    End Property
+    Public Property CleanupError As String
+        Get
+            Return mCleanupError
+        End Get
+    End Property
+    Public Property RetainedPath As String
+        Get
+            Return mRetainedPath
+        End Get
+    End Property
+
+    Private Sub RequireOpen()
+        If mClosed Then Throw New AtomicFileException("Transaction is closed")
+    End Sub
+
+    Public Sub Append(data As Bytes)
+        Me.RequireOpen()
+        If data = Nil Then Throw New InvalidArgumentException("Bytes are required")
+        If data.Count > mLimit - mCount Then Throw New InvalidArgumentException("Atomic file byte limit exceeded")
+        Try
+            Dim offset As Integer = 0
+            While offset < data.Count
+                Dim amount As Integer = Math.Min(65536, data.Count - offset)
+                #If TargetWindows Then
+                    Dim written As UInt32
+                    If AFWrite(mHandle, AFAt(data.DataPtr(), offset), amount, written, Nil) = 0 Or written = 0 Then Throw New AtomicFileException("Staged write failed")
+                    offset += written
+                #Else
+                    Dim written As Integer = AFWrite(mDescriptor, AFAt(data.DataPtr(), offset), amount)
+                    If written <= 0 Then Throw New AtomicFileException("Staged write failed")
+                    offset += written
+                #End If
+            End While
+            mCount += data.Count
+        Catch error As Exception
+            Me.Abort()
+            Throw error
+        End Try
+    End Sub
+
+    Private Sub CompareExpected(expected As String)
+        Dim bytes As Bytes = Bytes.FromString(expected, Text.Encodings.UTF8)
+        Dim scratch As Bytes = AFBuffer(65536)
+        #If TargetWindows Then
+            Dim wide As Bytes = AFWide(mPath)
+            Dim input As Ptr = AFCreate(wide.DataPtr(), 2147483648, 7, Nil, 3, 2097152, Nil)
+            If input = CType(-1, Ptr) Then Throw New AtomicFileException("Cannot read original for comparison")
+        #Else
+            #If TargetMac Then
+                Dim nativeOptions As Int32 = 16777476
+            #ElseIf TargetArm Then
+                Dim nativeOptions As Int32 = 559104
+            #Else
+                Dim nativeOptions As Int32 = 657408
+            #End If
+            Dim input As Int32 = AFOpen(mPath, nativeOptions)
+            If input < 0 Then Throw New AtomicFileException("Cannot read original for comparison")
+        #End If
+        Dim comparisonError As Exception = Nil
+        Try
+            Dim offset As Integer = 0
+            While True
+                #If TargetWindows Then
+                    Dim received As UInt32
+                    If AFRead(input, scratch.DataPtr(), 65536, received, Nil) = 0 Then Throw New AtomicFileException("Original read failed")
+                    Dim count As Integer = received
+                #Else
+                    Dim count As Integer = AFRead(input, scratch.DataPtr(), 65536)
+                    If count < 0 Then Throw New AtomicFileException("Original read failed")
+                #End If
+                If count = 0 Then Exit While
+                If count > bytes.Count - offset Then Throw New AtomicFileException("The file changed on disk; reopen it before saving")
+                If AFCompare(scratch.DataPtr(), AFAt(bytes.DataPtr(), offset), count) <> 0 Then Throw New AtomicFileException("The file changed on disk; reopen it before saving")
+                offset += count
+            End While
+            If offset <> bytes.Count Then Throw New AtomicFileException("The file changed on disk; reopen it before saving")
+        Catch error As Exception
+            comparisonError = error
+        Finally
+            #If TargetWindows Then
+                Dim closeFailed As Boolean = AFClose(input) = 0
+            #Else
+                Dim closeFailed As Boolean = AFClose(input) <> 0
+            #End If
+            If closeFailed And comparisonError = Nil Then comparisonError = New AtomicFileException("Original comparison close failed")
+        End Try
+        If comparisonError <> Nil Then Throw comparisonError
+    End Sub
+
+    Public Sub CommitExpectedText(expected As String)
+        Me.Publish(expected, True)
+    End Sub
+
+    Public Sub Commit()
+        Me.Publish("", False)
+    End Sub
+
+    Private Sub Publish(expected As String, compareOriginal As Boolean)
+        Me.RequireOpen()
+        Try
+            Dim mode As Integer = AFInspect(mPath)
+            #If TargetWindows Then
+                If AFFlush(mHandle) = 0 Then Throw New AtomicFileException("Staged flush failed")
+                Dim handle As Ptr = mHandle
+                mHandle = Nil
+                If AFClose(handle) = 0 Then Throw New AtomicFileException("Staged close failed")
+                mode = AFInspect(mPath)
+                If compareOriginal Then
+                    If mode < 0 Then Throw New AtomicFileException("Original file was removed; reopen it before saving")
+                    Me.CompareExpected(expected)
+                End If
+                Dim source As Bytes = AFWide(mTemporary)
+                Dim destination As Bytes = AFWide(mPath)
+                If mode < 0 Then
+                    If AFMove(source.DataPtr(), destination.DataPtr(), 8) = 0 Then Throw New AtomicFileException("Atomic creation failed (native error " + Str(AFLastError()) + ")")
+                Else
+                    ' A backup is essential: ReplaceFileW errors 1176/1177 can
+                    ' otherwise remove the original name before returning failure.
+                    Dim backupPath As String = mTemporary + ".original"
+                    Dim backup As Bytes = AFWide(backupPath)
+                    If AFAttributes(backup.DataPtr()) <> 4294967295 Then Throw New AtomicFileException("Replacement backup already exists")
+                    If AFLastError() <> 2 Then Throw New AtomicFileException("Cannot inspect replacement backup")
+                    If AFReplace(destination.DataPtr(), source.DataPtr(), backup.DataPtr(), 0, Nil, Nil) = 0 Then
+                        Dim code As UInt32 = AFLastError()
+                        If code = 1177 Then
+                            ' Restore without overwriting a newcomer. If restoration
+                            ' fails, retain BOTH original backup and staged content.
+                            If AFMove(backup.DataPtr(), destination.DataPtr(), 8) = 0 Then
+                                mCleanupError = "Replacement recovery failed; original retained: " + backupPath + "; staged content retained: " + mTemporary
+                                mRetainedPath = mTemporary
+                                mTemporary = ""
+                                mClosed = True
+                            End If
+                        End If
+                        Throw New AtomicFileException("Atomic replacement failed (native error " + Str(code) + ")")
+                    End If
+                    mCommitted = True
+                    mClosed = True
+                    mTemporary = ""
+                    If AFDelete(backup.DataPtr()) = 0 Then
+                        mCleanupError = "Replacement committed; original backup retained: " + backupPath
+                        mRetainedPath = backupPath
+                    End If
+                End If
+            #Else
+                Dim group As UInt32
+                If mode >= 0 Then
+                    group = AFGroup(mPath)
+                    If AFChown(mDescriptor, 4294967295, group) <> 0 Then Throw New AtomicFileException("Cannot preserve destination group")
+                    If AFChmod(mDescriptor, mode) <> 0 Then Throw New AtomicFileException("Cannot preserve destination permissions")
+                End If
+                If AFFlush(mDescriptor) <> 0 Then Throw New AtomicFileException("Staged flush failed")
+                Dim descriptor As Int32 = mDescriptor
+                mDescriptor = -1
+                If AFClose(descriptor) <> 0 Then Throw New AtomicFileException("Staged close failed")
+                Dim finalMode As Integer = AFInspect(mPath)
+                If finalMode <> mode Then Throw New AtomicFileException("Destination permissions or existence changed during save")
+                If finalMode >= 0 Then
+                    If AFGroup(mPath) <> group Then Throw New AtomicFileException("Destination group changed during save")
+                End If
+                If compareOriginal Then
+                    If finalMode < 0 Then Throw New AtomicFileException("Original file was removed; reopen it before saving")
+                    Me.CompareExpected(expected)
+                End If
+                If AFRename(mTemporary, mPath) <> 0 Then Throw New AtomicFileException("Atomic replacement failed")
+            #End If
+            mTemporary = ""
+            mCommitted = True
+            mClosed = True
+        Catch error As Exception
+            Me.Abort()
+            Throw error
+        End Try
+    End Sub
+
+    Public Sub Abort()
+        If mClosed Then Exit Sub
+        mClosed = True
+        #If TargetWindows Then
+            If mHandle <> Nil Then
+                Dim handle As Ptr = mHandle
+                mHandle = Nil
+                If AFClose(handle) = 0 Then mCleanupError = "Staged cleanup close failed"
+            End If
+            If mTemporary <> "" Then
+                Dim entryPath As Bytes = AFWide(mTemporary)
+                If AFDelete(entryPath.DataPtr()) = 0 Then
+                    mCleanupError += " Staged cleanup deletion failed: " + mTemporary
+                    mRetainedPath = mTemporary
+                End If
+            End If
+        #Else
+            If mDescriptor >= 0 Then
+                Dim descriptor As Int32 = mDescriptor
+                mDescriptor = -1
+                If AFClose(descriptor) <> 0 Then mCleanupError = "Staged cleanup close failed"
+            End If
+            If mTemporary <> "" Then
+                If AFDelete(mTemporary) <> 0 Then
+                    mCleanupError += " Staged cleanup deletion failed: " + mTemporary
+                    mRetainedPath = mTemporary
+                End If
+            End If
+        #End If
+        mTemporary = ""
+    End Sub
+
+    Public Sub Destructor()
+        Me.Abort()
+    End Sub
+End Class
+
+Public Sub AtomicWriteText(destination As String, content As String, expected As String)
+    Dim bytes As Bytes
+    Try
+        bytes = Bytes.FromString(content, Text.Encodings.UTF8)
+    Catch error As EncodingException
+        Throw New AtomicFileException("Save text must be valid UTF-8: " + error.Message)
+    End Try
+    Dim transaction As New AtomicFileTransaction(destination, bytes.Count)
+    Try
+        transaction.Append(bytes)
+        transaction.CommitExpectedText(expected)
+        If transaction.CleanupError <> "" Then Throw New AtomicFileException("Save committed; " + transaction.CleanupError, True)
+    Catch error As Exception
+        transaction.Abort()
+        If transaction.IsCommitted Then Throw New AtomicFileException(error.Message, True)
+        If transaction.CleanupError <> "" Then Throw New AtomicFileException(error.Message + "; " + transaction.CleanupError)
+        If error IsA EncodingException Then Throw New AtomicFileException("Expected disk text must be valid UTF-8: " + error.Message)
+        Throw error
+    Finally
+        transaction.Abort()
+    End Try
+End Sub
