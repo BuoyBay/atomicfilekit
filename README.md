@@ -1,4 +1,4 @@
-# Same-directory atomic file replace, bounded staging
+# Atomic same-directory file replace
 
 See [API.md](docs/API.md) for the integration contract. Files are staged exclusively
 beside the destination, written in 64 KiB native calls, fsync'd (FlushFileBuffers

@@ -1,1 +1,1 @@
-{"schema":1,"name":"atomicfilekit","version":"0.1.0","description":"Same-directory atomic file replace, bounded staging"}
+{"schema":1,"name":"atomicfilekit","version":"0.1.0","description":"Atomic same-directory file replace"}
