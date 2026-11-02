@@ -113,8 +113,6 @@ No parameters.
 
 Returns: no value.
 
-## AtomicFileKit functions
-
 ### AtomicWriteText
 
 `Public Sub AtomicWriteText(destination As String, content As String, expected As String)`

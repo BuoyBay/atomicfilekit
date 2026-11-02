@@ -1,6 +1,6 @@
 # AtomicFileKit
 
-See [API.md](API.md) for the integration contract. Files are staged exclusively
+The integration contract below covers native file replacement. Files are staged exclusively
 beside the destination, written in 64 KiB native calls, fsync'd (FlushFileBuffers
 on Windows), closed
 and published through rename (POSIX) or ReplaceFileW/MoveFileExW (Windows).
@@ -26,9 +26,3 @@ failure can leave the destination missing. If backup deletion fails after a
 successful save, the transaction stays committed; the text helper reports an
 `AtomicFileException` whose `IsCommitted` is True. See the
 [documented Windows failure states](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-replacefilew).
-
-## Verification
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-

@@ -35,11 +35,6 @@ successful save, the transaction stays committed; the text helper reports an
 `AtomicFileException` whose `IsCommitted` is True. See the
 [documented Windows failure states](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-replacefilew).
 
-## Verification
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
 ## Integration contract
 
 # AtomicFileKit integration contract
